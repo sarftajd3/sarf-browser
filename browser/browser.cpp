@@ -69,7 +69,6 @@ void SwitchToTab(int index, HWND hWnd);
 void CloseTab(int index, HWND hWnd);
 void UpdateLayout(HWND hWnd);
 
-// --- HELPERS ---
 void SyncAddressBar() {
     if (activeTabIndex != -1 && activeTabIndex < (int)tabs.size() && tabs[activeTabIndex].webview) {
         wil::unique_cotaskmem_string url;
@@ -97,7 +96,6 @@ void UpdateLayout(HWND hWnd) {
     if (activeTabIndex == -1 || activeTabIndex >= (int)tabs.size()) return;
     RECT rc;
     GetClientRect(hWnd, &rc);
-
     if (isVideoFullScreen) {
         RECT full = { 0, 0, rc.right, rc.bottom };
         tabs[activeTabIndex].controller->put_Bounds(full);
@@ -107,16 +105,13 @@ void UpdateLayout(HWND hWnd) {
         int xOff = isSidebarOpen ? currentSidebarWidth : 0;
         RECT webBounds = { xOff, HEADER_TOTAL_HEIGHT, rc.right, rc.bottom };
         tabs[activeTabIndex].controller->put_Bounds(webBounds);
-
         MoveWindow(hBtnClose, rc.right - 46, 0, 46, 32, TRUE);
         MoveWindow(hBtnMax, rc.right - 92, 0, 46, 32, TRUE);
         MoveWindow(hBtnMin, rc.right - 138, 0, 46, 32, TRUE);
         MoveWindow(hSidebarBtn, 10, 10, 40, 40, TRUE);
-
         int editW = min(rc.right - 400, 700);
         int editX = (rc.right - editW) / 2;
         MoveWindow(hEdit, editX, 15, editW, 30, TRUE);
-
         if (isSidebarOpen) {
             MoveWindow(hExpandBtn, 15, HEADER_TOTAL_HEIGHT + 10, 80, 28, TRUE);
             MoveWindow(hSettingsBtn, currentSidebarWidth - 45, HEADER_TOTAL_HEIGHT + 10, 32, 28, TRUE);
@@ -176,14 +171,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         hSettingsBtn = CreateWindow(L"BUTTON", L"⚙", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_SETTINGS_BTN, NULL, NULL);
         hClearBtn = CreateWindow(L"BUTTON", L"Clear History", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_CLEAR_HISTORY_BTN, NULL, NULL);
     } break;
-
     case WM_SIZE: UpdateLayout(hWnd); break;
-
     case WM_MOUSEMOVE: {
         POINT pt = { LOWORD(lParam), HIWORD(lParam) };
         int lastHover = hoveredHistoryIndex;
         hoveredHistoryIndex = -1;
-
         if (isSidebarOpen && !isSettingsView) {
             int hy = HEADER_TOTAL_HEIGHT + 100;
             for (int i = 0; i < (int)historyList.size(); i++) {
@@ -195,7 +187,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (hoveredHistoryIndex != -1) SetCursor(LoadCursor(NULL, IDC_HAND));
         if (lastHover != hoveredHistoryIndex) InvalidateRect(hWnd, NULL, FALSE);
     } break;
-
     case WM_LBUTTONDOWN: {
         POINT pt = { LOWORD(lParam), HIWORD(lParam) };
         if (hoveredHistoryIndex != -1) {
@@ -207,7 +198,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (PtInRect(&tabs[i].tabRect, pt)) { SwitchToTab(i, hWnd); return 0; }
         }
     } break;
-
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT pdis = (LPDRAWITEMSTRUCT)lParam;
         HBRUSH hBtnBrush = CreateSolidBrush(colBtnBg);
@@ -220,19 +210,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         DrawText(pdis->hDC, txt, -1, &pdis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return TRUE;
     }
-
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc; GetClientRect(hWnd, &rc);
-
-        // Backgrounds
         RECT headerR = { 0, 0, rc.right, HEADER_TOTAL_HEIGHT };
         HBRUSH hHead = CreateSolidBrush(colBgHeader);
         FillRect(hdc, &headerR, hHead);
         DeleteObject(hHead);
         SetBkMode(hdc, TRANSPARENT);
-
         if (isSidebarOpen) {
             RECT sideR = { 0, HEADER_TOTAL_HEIGHT, currentSidebarWidth, rc.bottom };
             HBRUSH hSide = CreateSolidBrush(colBgSidebar);
@@ -264,8 +250,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
             }
         }
-
-        // Tabs
         int tx = 10;
         for (int i = 0; i < (int)tabs.size(); i++) {
             tabs[i].tabRect = { tx, 66, tx + TAB_WIDTH, 100 };
@@ -289,7 +273,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         MoveWindow(hNewTabBtn, tx, 69, 28, 28, TRUE);
         EndPaint(hWnd, &ps);
     } break;
-
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_WIN_CLOSE: PostQuitMessage(0); break;
@@ -306,19 +289,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
         }
         break;
-
     case WM_NCHITTEST: {
         POINT pt = { LOWORD(lParam), HIWORD(lParam) };
         ScreenToClient(hWnd, &pt);
         RECT rc; GetClientRect(hWnd, &rc);
         if (pt.y < 32 && pt.x >(rc.right - 140)) return HTCLIENT;
         if (pt.y < HEADER_TOTAL_HEIGHT) {
-            if (pt.y > 60 || (pt.x > 10 && pt.x < 50)) return HTCLIENT; // Area for buttons/tabs
+            if (pt.y > 60 || (pt.x > 10 && pt.x < 50)) return HTCLIENT;
             return HTCAPTION;
         }
         return DefWindowProc(hWnd, msg, wParam, lParam);
     } break;
-
     case WM_DESTROY: PostQuitMessage(0); break;
     default: return DefWindowProc(hWnd, msg, wParam, lParam);
     }
