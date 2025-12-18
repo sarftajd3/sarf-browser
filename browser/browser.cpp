@@ -557,7 +557,7 @@ void CreateNewTab(HWND hWnd) {
 
                             tabs.push_back(nt);
                             SwitchToTab((int)tabs.size() - 1, hWnd);
-                            nt.webview->Navigate(L"https://tetr.io/");
+                            nt.webview->Navigate(L"https://www.google.com/?zx=1766092908811&no_sw_cr=1");
                         }
                         return S_OK;
                     }).Get());
