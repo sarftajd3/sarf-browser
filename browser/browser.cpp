@@ -3,11 +3,15 @@
 #include <string>
 #include <wrl.h>
 #include <wil/com.h>
+#include <fstream>
+#include <filesystem>
+#include <algorithm> // For transform
 #include "WebView2.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "Msimg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 using namespace Microsoft::WRL;
 
@@ -21,6 +25,11 @@ const int IDC_EXPAND_SIDEBAR = 107;
 const int IDC_WIN_MIN = 108;
 const int IDC_WIN_MAX = 110;
 const int IDC_WIN_CLOSE = 109;
+const int IDC_OPEN_DATA_BTN = 111;
+
+const int IDM_DUPLICATE_TAB = 201;
+const int IDM_MUTE_TAB = 202;
+const int IDM_CLOSE_TAB = 203;
 
 const int HEADER_TOTAL_HEIGHT = 100;
 const int SIDEBAR_MIN_WIDTH = 260;
@@ -42,9 +51,10 @@ std::vector<std::wstring> historyList;
 int activeTabIndex = -1;
 int hoveredHistoryIndex = -1;
 int currentSidebarWidth = SIDEBAR_MIN_WIDTH;
-HWND hEdit, hSidebarBtn, hNewTabBtn, hClearBtn, hSettingsBtn, hExpandBtn, hBtnMin, hBtnMax, hBtnClose;
+HWND hEdit, hSidebarBtn, hNewTabBtn, hClearBtn, hSettingsBtn, hExpandBtn, hBtnMin, hBtnMax, hBtnClose, hBtnOpenData;
 WNDPROC OldEditProc;
 HFONT hFontMain, hFontSmall, hFontSymbols;
+HBRUSH hBrushEdit;
 bool isSidebarOpen = true;
 bool isSettingsView = false;
 bool isExpanded = false;
@@ -69,11 +79,69 @@ void SwitchToTab(int index, HWND hWnd);
 void CloseTab(int index, HWND hWnd);
 void UpdateLayout(HWND hWnd);
 
+// --- AD BLOCKER LOGIC ---
+bool IsAdUrl(std::wstring url) {
+    // Convert to lowercase for easier matching
+    std::transform(url.begin(), url.end(), url.begin(), ::towlower);
+
+    // List of common ad server keywords
+    const wchar_t* adKeywords[] = {
+        L"doubleclick.net",
+        L"googlesyndication.com",
+        L"googleadservices.com",
+        L"adnxs.com",
+        L"criteo.com",
+        L"pubmatic.com",
+        L"rubiconproject.com",
+        L"adsystem",
+        L"/ads/",
+        L"pagead2",
+        L"amazon-adsystem",
+        L"ads.twitter.com",
+        L"facebook.com/tr/", // Pixel trackers
+        L"moatads.com"
+    };
+
+    for (const auto& keyword : adKeywords) {
+        if (url.find(keyword) != std::wstring::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- PERSISTENCE FUNCTIONS ---
+void SaveHistoryToFile() {
+    std::wofstream file("history.dat", std::ios::out | std::ios::trunc);
+    if (file.is_open()) {
+        for (const auto& url : historyList) {
+            file << url << std::endl;
+        }
+        file.close();
+    }
+}
+
+void LoadHistoryFromFile() {
+    std::wifstream file("history.dat");
+    if (file.is_open()) {
+        historyList.clear();
+        std::wstring line;
+        while (std::getline(file, line)) {
+            if (!line.empty()) {
+                historyList.push_back(line);
+            }
+        }
+        file.close();
+    }
+}
+
 void SyncAddressBar() {
     if (activeTabIndex != -1 && activeTabIndex < (int)tabs.size() && tabs[activeTabIndex].webview) {
-        wil::unique_cotaskmem_string url;
-        tabs[activeTabIndex].webview->get_Source(&url);
-        SetWindowText(hEdit, url.get());
+        if (GetFocus() != hEdit) {
+            wil::unique_cotaskmem_string url;
+            tabs[activeTabIndex].webview->get_Source(&url);
+            SetWindowText(hEdit, url.get());
+        }
     }
 }
 
@@ -85,17 +153,23 @@ void ToggleUIElements(bool show) {
     ShowWindow(hBtnMin, cmd);
     ShowWindow(hBtnMax, cmd);
     ShowWindow(hBtnClose, cmd);
+
     int sidebarCmd = (show && isSidebarOpen) ? SW_SHOW : SW_HIDE;
     ShowWindow(hSettingsBtn, sidebarCmd);
     ShowWindow(hExpandBtn, sidebarCmd);
+
     int histCmd = (sidebarCmd == SW_SHOW && !isSettingsView) ? SW_SHOW : SW_HIDE;
     ShowWindow(hClearBtn, histCmd);
+
+    int settCmd = (sidebarCmd == SW_SHOW && isSettingsView) ? SW_SHOW : SW_HIDE;
+    ShowWindow(hBtnOpenData, settCmd);
 }
 
 void UpdateLayout(HWND hWnd) {
     if (activeTabIndex == -1 || activeTabIndex >= (int)tabs.size()) return;
     RECT rc;
     GetClientRect(hWnd, &rc);
+
     if (isVideoFullScreen) {
         RECT full = { 0, 0, rc.right, rc.bottom };
         tabs[activeTabIndex].controller->put_Bounds(full);
@@ -105,29 +179,54 @@ void UpdateLayout(HWND hWnd) {
         int xOff = isSidebarOpen ? currentSidebarWidth : 0;
         RECT webBounds = { xOff, HEADER_TOTAL_HEIGHT, rc.right, rc.bottom };
         tabs[activeTabIndex].controller->put_Bounds(webBounds);
+
         MoveWindow(hBtnClose, rc.right - 46, 0, 46, 32, TRUE);
         MoveWindow(hBtnMax, rc.right - 92, 0, 46, 32, TRUE);
         MoveWindow(hBtnMin, rc.right - 138, 0, 46, 32, TRUE);
         MoveWindow(hSidebarBtn, 10, 10, 40, 40, TRUE);
+
         int editW = min(rc.right - 400, 700);
         int editX = (rc.right - editW) / 2;
-        MoveWindow(hEdit, editX, 15, editW, 30, TRUE);
+        MoveWindow(hEdit, editX, 15, editW, 28, TRUE);
+
         if (isSidebarOpen) {
             MoveWindow(hExpandBtn, 15, HEADER_TOTAL_HEIGHT + 10, 80, 28, TRUE);
             MoveWindow(hSettingsBtn, currentSidebarWidth - 45, HEADER_TOTAL_HEIGHT + 10, 32, 28, TRUE);
             MoveWindow(hClearBtn, 15, rc.bottom - 45, currentSidebarWidth - 30, 30, TRUE);
+            MoveWindow(hBtnOpenData, 15, HEADER_TOTAL_HEIGHT + 100, currentSidebarWidth - 30, 30, TRUE);
         }
         ToggleUIElements(true);
     }
 }
 
+// --- EDIT PROC (Address Bar) ---
 LRESULT CALLBACK EditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
-        wchar_t url[2048]; GetWindowText(hWnd, url, 2048);
-        std::wstring urlStr(url);
-        if (urlStr.find(L"://") == std::wstring::npos) urlStr = L"https://www.google.com/search?q=" + urlStr;
-        if (activeTabIndex != -1 && tabs[activeTabIndex].webview) tabs[activeTabIndex].webview->Navigate(urlStr.c_str());
-        return 0;
+    static bool needsSelectAll = false;
+    switch (msg) {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            wchar_t url[2048]; GetWindowText(hWnd, url, 2048);
+            std::wstring urlStr(url);
+            if (urlStr.find(L"://") == std::wstring::npos) urlStr = L"https://www.google.com/search?q=" + urlStr;
+            if (activeTabIndex != -1 && tabs[activeTabIndex].webview) tabs[activeTabIndex].webview->Navigate(urlStr.c_str());
+            return 0;
+        }
+        if (wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            SendMessage(hWnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        break;
+    case WM_SETFOCUS: {
+        LRESULT res = CallWindowProc(OldEditProc, hWnd, msg, wParam, lParam);
+        if (GetKeyState(VK_LBUTTON) < 0) needsSelectAll = true;
+        else SendMessage(hWnd, EM_SETSEL, 0, -1);
+        return res;
+    }
+    case WM_LBUTTONUP: {
+        LRESULT res = CallWindowProc(OldEditProc, hWnd, msg, wParam, lParam);
+        if (needsSelectAll) { SendMessage(hWnd, EM_SETSEL, 0, -1); needsSelectAll = false; }
+        return res;
+    }
     }
     return CallWindowProc(OldEditProc, hWnd, msg, wParam, lParam);
 }
@@ -137,6 +236,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     hFontSmall = CreateFont(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     hFontSymbols = CreateFont(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
 
+    hBrushEdit = CreateSolidBrush(colBtnBg);
+
     WNDCLASSEX wcex = { sizeof(WNDCLASSEX), CS_HREDRAW | CS_VREDRAW, WndProc, 0, 0, hInstance, NULL,
                         LoadCursor(NULL, IDC_ARROW), CreateSolidBrush(colBgHeader), NULL, L"SARF_CORE", NULL };
     RegisterClassEx(&wcex);
@@ -145,7 +246,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, NULL, NULL, hInstance, NULL);
 
     hSidebarBtn = CreateWindow(L"BUTTON", L"☰", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_SIDEBAR_BTN, hInstance, NULL);
-    hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", L"Search...", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)IDC_ADDRESS_BAR, hInstance, NULL);
+    hEdit = CreateWindowEx(0, L"EDIT", L"Search...", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL | WS_BORDER, 0, 0, 0, 0, hWnd, (HMENU)IDC_ADDRESS_BAR, hInstance, NULL);
     SendMessage(hEdit, WM_SETFONT, (WPARAM)hFontMain, TRUE);
     OldEditProc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)EditProc);
 
@@ -154,6 +255,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
     hBtnMax = CreateWindow(L"BUTTON", L"▢", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_WIN_MAX, hInstance, NULL);
     hBtnMin = CreateWindow(L"BUTTON", L"—", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_WIN_MIN, hInstance, NULL);
 
+    LoadHistoryFromFile();
     CreateNewTab(hWnd);
 
     MSG msg;
@@ -161,6 +263,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    DeleteObject(hBrushEdit);
     return (int)msg.wParam;
 }
 
@@ -170,13 +273,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         hExpandBtn = CreateWindow(L"BUTTON", L"RESIZE", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_EXPAND_SIDEBAR, NULL, NULL);
         hSettingsBtn = CreateWindow(L"BUTTON", L"⚙", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_SETTINGS_BTN, NULL, NULL);
         hClearBtn = CreateWindow(L"BUTTON", L"Clear History", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_CLEAR_HISTORY_BTN, NULL, NULL);
+        hBtnOpenData = CreateWindow(L"BUTTON", L"Open Data Location", WS_CHILD | BS_OWNERDRAW, 0, 0, 0, 0, hWnd, (HMENU)IDC_OPEN_DATA_BTN, NULL, NULL);
     } break;
+
     case WM_SIZE: UpdateLayout(hWnd); break;
+
+    case WM_CTLCOLOREDIT: {
+        HDC hdcEdit = (HDC)wParam;
+        SetTextColor(hdcEdit, colTextMain);
+        SetBkColor(hdcEdit, colBtnBg);
+        return (LRESULT)hBrushEdit;
+    }
+
+    case WM_KEYDOWN: {
+        bool ctrl = GetKeyState(VK_CONTROL) & 0x8000;
+        bool alt = GetKeyState(VK_MENU) & 0x8000;
+        if (ctrl) {
+            if (wParam == 'T') CreateNewTab(hWnd);
+            if (wParam == 'W') CloseTab(activeTabIndex, hWnd);
+            if (wParam == 'L') { SetFocus(hEdit); }
+            if (wParam == 'R') if (activeTabIndex != -1) tabs[activeTabIndex].webview->Reload();
+            if (wParam == 'H') { isSidebarOpen = !isSidebarOpen; UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE); }
+            if (wParam == VK_TAB) { if (!tabs.empty()) SwitchToTab((activeTabIndex + 1) % tabs.size(), hWnd); }
+        }
+        if (activeTabIndex != -1) {
+            if (wParam == VK_F5) tabs[activeTabIndex].webview->Reload();
+            if ((alt && wParam == VK_LEFT) || wParam == VK_BACK) tabs[activeTabIndex].webview->GoBack();
+            if (alt && wParam == VK_RIGHT) tabs[activeTabIndex].webview->GoForward();
+        }
+    } break;
+
     case WM_MOUSEMOVE: {
         POINT pt = { LOWORD(lParam), HIWORD(lParam) };
         int lastHover = hoveredHistoryIndex;
         hoveredHistoryIndex = -1;
-        if (isSidebarOpen && !isSettingsView) {
+        if (isSidebarOpen && !isSettingsView && !isVideoFullScreen) {
             int hy = HEADER_TOTAL_HEIGHT + 100;
             for (int i = 0; i < (int)historyList.size(); i++) {
                 RECT r = { 20, hy, currentSidebarWidth - 20, hy + 25 };
@@ -187,7 +318,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (hoveredHistoryIndex != -1) SetCursor(LoadCursor(NULL, IDC_HAND));
         if (lastHover != hoveredHistoryIndex) InvalidateRect(hWnd, NULL, FALSE);
     } break;
+
     case WM_LBUTTONDOWN: {
+        if (isVideoFullScreen) return 0;
         POINT pt = { LOWORD(lParam), HIWORD(lParam) };
         if (hoveredHistoryIndex != -1) {
             tabs[activeTabIndex].webview->Navigate(historyList[hoveredHistoryIndex].c_str());
@@ -198,6 +331,30 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (PtInRect(&tabs[i].tabRect, pt)) { SwitchToTab(i, hWnd); return 0; }
         }
     } break;
+
+    case WM_RBUTTONDOWN: {
+        if (isVideoFullScreen) return 0;
+        POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+        for (int i = 0; i < (int)tabs.size(); i++) {
+            if (PtInRect(&tabs[i].tabRect, pt)) {
+                SwitchToTab(i, hWnd);
+                HMENU hMenu = CreatePopupMenu();
+                BOOL isMuted = FALSE;
+                wil::com_ptr<ICoreWebView2_8> wv8;
+                if (tabs[i].webview->QueryInterface(IID_PPV_ARGS(&wv8)) == S_OK) wv8->get_IsMuted(&isMuted);
+                AppendMenu(hMenu, MF_STRING, IDM_DUPLICATE_TAB, L"Duplicate Tab");
+                AppendMenu(hMenu, MF_STRING, IDM_MUTE_TAB, isMuted ? L"Unmute Tab" : L"Mute Tab");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenu(hMenu, MF_STRING, IDM_CLOSE_TAB, L"Close Tab");
+                POINT screenPt = pt;
+                ClientToScreen(hWnd, &screenPt);
+                TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, screenPt.x, screenPt.y, 0, hWnd, NULL);
+                DestroyMenu(hMenu);
+                return 0;
+            }
+        }
+    } break;
+
     case WM_DRAWITEM: {
         LPDRAWITEMSTRUCT pdis = (LPDRAWITEMSTRUCT)lParam;
         HBRUSH hBtnBrush = CreateSolidBrush(colBtnBg);
@@ -214,6 +371,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT rc; GetClientRect(hWnd, &rc);
+        if (isVideoFullScreen) {
+            HBRUSH hBlack = CreateSolidBrush(RGB(0, 0, 0));
+            FillRect(hdc, &rc, hBlack);
+            DeleteObject(hBlack);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
         RECT headerR = { 0, 0, rc.right, HEADER_TOTAL_HEIGHT };
         HBRUSH hHead = CreateSolidBrush(colBgHeader);
         FillRect(hdc, &headerR, hHead);
@@ -242,9 +406,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         DeleteObject(hGlow);
                         SetTextColor(hdc, colAccent);
                     }
-                    else {
-                        SetTextColor(hdc, colTextDim);
-                    }
+                    else SetTextColor(hdc, colTextDim);
                     DrawText(hdc, historyList[i].c_str(), -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
                     hy += 30;
                 }
@@ -280,24 +442,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_WIN_MAX: IsZoomed(hWnd) ? ShowWindow(hWnd, SW_RESTORE) : ShowWindow(hWnd, SW_MAXIMIZE); break;
         case IDC_SIDEBAR_BTN: isSidebarOpen = !isSidebarOpen; UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE); break;
         case IDC_NEW_TAB_BTN: CreateNewTab(hWnd); break;
-        case IDC_SETTINGS_BTN: isSettingsView = !isSettingsView; InvalidateRect(hWnd, NULL, TRUE); break;
-        case IDC_CLEAR_HISTORY_BTN: historyList.clear(); InvalidateRect(hWnd, NULL, TRUE); break;
-        case IDC_EXPAND_SIDEBAR:
-            isExpanded = !isExpanded;
-            currentSidebarWidth = isExpanded ? SIDEBAR_MAX_WIDTH : SIDEBAR_MIN_WIDTH;
-            UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE);
-            break;
+        case IDC_SETTINGS_BTN: isSettingsView = !isSettingsView; UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE); break;
+        case IDC_CLEAR_HISTORY_BTN: historyList.clear(); SaveHistoryToFile(); InvalidateRect(hWnd, NULL, TRUE); break;
+        case IDC_OPEN_DATA_BTN: {
+            wchar_t path[MAX_PATH]; GetModuleFileName(NULL, path, MAX_PATH);
+            std::wstring p(path); p = p.substr(0, p.find_last_of(L"\\/") + 1) + L"history.dat";
+            std::wstring param = L"/select,\"" + p + L"\"";
+            ShellExecute(NULL, L"open", L"explorer.exe", param.c_str(), NULL, SW_SHOW);
+        } break;
+        case IDC_EXPAND_SIDEBAR: isExpanded = !isExpanded; currentSidebarWidth = isExpanded ? SIDEBAR_MAX_WIDTH : SIDEBAR_MIN_WIDTH; UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE); break;
+        case IDM_DUPLICATE_TAB: if (activeTabIndex != -1) { wil::unique_cotaskmem_string url; tabs[activeTabIndex].webview->get_Source(&url); CreateNewTab(hWnd); tabs[activeTabIndex].webview->Navigate(url.get()); } break;
+        case IDM_MUTE_TAB: if (activeTabIndex != -1) { wil::com_ptr<ICoreWebView2_8> wv8; if (tabs[activeTabIndex].webview->QueryInterface(IID_PPV_ARGS(&wv8)) == S_OK) { BOOL muted; wv8->get_IsMuted(&muted); wv8->put_IsMuted(!muted); } } break;
+        case IDM_CLOSE_TAB: CloseTab(activeTabIndex, hWnd); break;
         }
         break;
     case WM_NCHITTEST: {
-        POINT pt = { LOWORD(lParam), HIWORD(lParam) };
-        ScreenToClient(hWnd, &pt);
+        POINT pt = { LOWORD(lParam), HIWORD(lParam) }; ScreenToClient(hWnd, &pt);
         RECT rc; GetClientRect(hWnd, &rc);
+        if (isVideoFullScreen) return HTCLIENT;
         if (pt.y < 32 && pt.x >(rc.right - 140)) return HTCLIENT;
-        if (pt.y < HEADER_TOTAL_HEIGHT) {
-            if (pt.y > 60 || (pt.x > 10 && pt.x < 50)) return HTCLIENT;
-            return HTCAPTION;
-        }
+        if (pt.y < HEADER_TOTAL_HEIGHT) { if (pt.y > 60 || (pt.x > 10 && pt.x < 50)) return HTCLIENT; return HTCAPTION; }
         return DefWindowProc(hWnd, msg, wParam, lParam);
     } break;
     case WM_DESTROY: PostQuitMessage(0); break;
@@ -311,29 +475,89 @@ void CreateNewTab(HWND hWnd) {
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [hWnd](HRESULT res, ICoreWebView2Environment* env) -> HRESULT {
                 env->CreateCoreWebView2Controller(hWnd, Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                    [hWnd](HRESULT res, ICoreWebView2Controller* ctrl) -> HRESULT {
+                    [hWnd, env](HRESULT res, ICoreWebView2Controller* ctrl) -> HRESULT {
                         if (ctrl) {
                             BrowserTab nt;
                             nt.controller = ctrl;
                             nt.controller->get_CoreWebView2(&nt.webview);
+
+                            // --- 1. ENABLE FILTERING ---
+                            // Tells WebView2 to fire the 'WebResourceRequested' event for ALL resources
+                            nt.webview->AddWebResourceRequestedFilter(L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+
+                            // --- 2. ADD REQUEST HANDLER (THE AD BLOCKER) ---
+                            nt.webview->add_WebResourceRequested(
+                                Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                                    [env](ICoreWebView2* sender, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                                        wil::com_ptr<ICoreWebView2WebResourceRequest> request;
+                                        args->get_Request(&request);
+                                        wil::unique_cotaskmem_string uri;
+                                        request->get_Uri(&uri);
+                                        std::wstring url(uri.get());
+
+                                        // Check if the URL matches known ad domains
+                                        if (IsAdUrl(url)) {
+                                            // If it is an ad, provide an empty "403 Forbidden" response immediately
+                                            // This prevents the request from going to the network
+                                            wil::com_ptr<ICoreWebView2WebResourceResponse> response;
+                                            wil::com_ptr<IStream> stream; // Empty stream
+                                            env->CreateWebResourceResponse(nullptr, 403, L"Blocked", L"", &response);
+                                            args->put_Response(response.get());
+                                        }
+                                        return S_OK;
+                                    }).Get(), nullptr);
+
+                            nt.controller->add_AcceleratorKeyPressed(Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                                [hWnd](ICoreWebView2Controller* sender, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+                                    COREWEBVIEW2_KEY_EVENT_KIND kind; args->get_KeyEventKind(&kind);
+                                    if (kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN) {
+                                        UINT key; args->get_VirtualKey(&key);
+                                        bool ctrlKey = GetKeyState(VK_CONTROL) & 0x8000;
+                                        bool altKey = GetKeyState(VK_MENU) & 0x8000;
+                                        if (ctrlKey) {
+                                            if (key == 'T') { CreateNewTab(hWnd); args->put_Handled(TRUE); }
+                                            if (key == 'W') { CloseTab(activeTabIndex, hWnd); args->put_Handled(TRUE); }
+                                            if (key == 'L') { SetFocus(hEdit); args->put_Handled(TRUE); }
+                                            if (key == 'R') { if (activeTabIndex != -1) tabs[activeTabIndex].webview->Reload(); args->put_Handled(TRUE); }
+                                            if (key == 'H') { PostMessage(hWnd, WM_COMMAND, IDC_SIDEBAR_BTN, 0); args->put_Handled(TRUE); }
+                                            if (key == VK_TAB) { if (!tabs.empty()) SwitchToTab((activeTabIndex + 1) % tabs.size(), hWnd); args->put_Handled(TRUE); }
+                                        }
+                                        if (key == VK_F5) { if (activeTabIndex != -1) tabs[activeTabIndex].webview->Reload(); args->put_Handled(TRUE); }
+                                        if (altKey && key == VK_LEFT) { if (activeTabIndex != -1) tabs[activeTabIndex].webview->GoBack(); args->put_Handled(TRUE); }
+                                        if (altKey && key == VK_RIGHT) { if (activeTabIndex != -1) tabs[activeTabIndex].webview->GoForward(); args->put_Handled(TRUE); }
+                                    }
+                                    return S_OK;
+                                }).Get(), nullptr);
+
                             nt.webview->add_SourceChanged(Callback<ICoreWebView2SourceChangedEventHandler>(
                                 [hWnd](ICoreWebView2* s, ICoreWebView2SourceChangedEventArgs* a) -> HRESULT {
                                     wil::unique_cotaskmem_string url; s->get_Source(&url);
                                     if (historyList.empty() || historyList[0] != url.get()) {
                                         historyList.insert(historyList.begin(), url.get());
                                         if (historyList.size() > 25) historyList.pop_back();
+                                        SaveHistoryToFile();
                                     }
                                     SyncAddressBar(); InvalidateRect(hWnd, NULL, TRUE); return S_OK;
                                 }).Get(), nullptr);
+
                             nt.webview->add_DocumentTitleChanged(Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
                                 [hWnd](ICoreWebView2* s, IUnknown* a) -> HRESULT {
                                     wil::unique_cotaskmem_string t; s->get_DocumentTitle(&t);
                                     for (auto& tab : tabs) if (tab.webview.get() == s) tab.title = t.get();
                                     InvalidateRect(hWnd, NULL, TRUE); return S_OK;
                                 }).Get(), nullptr);
+
+                            nt.webview->add_ContainsFullScreenElementChanged(
+                                Callback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
+                                    [hWnd](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
+                                        BOOL isFull; sender->get_ContainsFullScreenElement(&isFull);
+                                        isVideoFullScreen = (isFull == TRUE); UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE);
+                                        return S_OK;
+                                    }).Get(), nullptr);
+
                             tabs.push_back(nt);
                             SwitchToTab((int)tabs.size() - 1, hWnd);
-                            nt.webview->Navigate(L"https://www.google.com");
+                            nt.webview->Navigate(L"https://tetr.io/");
                         }
                         return S_OK;
                     }).Get());
@@ -344,8 +568,12 @@ void CreateNewTab(HWND hWnd) {
 void SwitchToTab(int index, HWND hWnd) {
     if (index < 0 || index >= (int)tabs.size()) return;
     activeTabIndex = index;
+    BOOL isFull = FALSE;
+    if (tabs[activeTabIndex].webview) tabs[activeTabIndex].webview->get_ContainsFullScreenElement(&isFull);
+    isVideoFullScreen = (isFull == TRUE);
     for (int i = 0; i < (int)tabs.size(); i++) tabs[i].controller->put_IsVisible(i == activeTabIndex);
     UpdateLayout(hWnd); SyncAddressBar(); InvalidateRect(hWnd, NULL, TRUE);
+    tabs[activeTabIndex].controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
 }
 
 void CloseTab(int index, HWND hWnd) {
