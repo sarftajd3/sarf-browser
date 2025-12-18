@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+	<WebView2LoaderPreference>Static</WebView2LoaderPreference>
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{5dec2870-573c-44dd-b07f-59773bb6608d}</ProjectGuid>
