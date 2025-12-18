@@ -7,6 +7,7 @@
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "Msimg32.lib") // For GradientFill if needed
 
 using namespace Microsoft::WRL;
 
@@ -21,11 +22,12 @@ const int IDC_WIN_MIN = 108;
 const int IDC_WIN_MAX = 110;
 const int IDC_WIN_CLOSE = 109;
 
-const int HEADER_TOTAL_HEIGHT = 105;
+const int HEADER_TOTAL_HEIGHT = 100;
 const int SIDEBAR_MIN_WIDTH = 260;
-const int SIDEBAR_MAX_WIDTH = 550;
-const int TAB_WIDTH = 180;
-const int TAB_CLOSE_WIDTH = 30;
+const int SIDEBAR_MAX_WIDTH = 450;
+const int TAB_WIDTH = 200;
+const int TAB_HEIGHT = 34;
+const int TAB_CLOSE_WIDTH = 32;
 
 struct BrowserTab {
     wil::com_ptr<ICoreWebView2Controller> controller;
@@ -40,16 +42,20 @@ int activeTabIndex = -1;
 int currentSidebarWidth = SIDEBAR_MIN_WIDTH;
 HWND hEdit, hSidebarBtn, hNewTabBtn, hClearBtn, hToggleViewBtn, hExpandBtn, hBtnMin, hBtnMax, hBtnClose;
 WNDPROC OldEditProc;
+HFONT hFontMain, hFontSmall;
 bool isSidebarOpen = true;
 bool isExtrasView = false;
 bool isExpanded = false;
 bool isVideoFullScreen = false;
 
-// --- MODERN PALETTE ---
-COLORREF colHeader = RGB(28, 28, 30);
-COLORREF colTabActive = RGB(60, 60, 64);
-COLORREF colAccent = RGB(0, 153, 255);
-COLORREF colWhite = RGB(255, 255, 255);
+// --- REFINED COLOR PALETTE ---
+COLORREF colBgHeader = RGB(24, 24, 28);
+COLORREF colBgSidebar = RGB(18, 18, 20);
+COLORREF colTabActive = RGB(38, 38, 42);
+COLORREF colTabInactive = RGB(28, 28, 32);
+COLORREF colAccent = RGB(0, 120, 215);
+COLORREF colTextMain = RGB(240, 240, 240);
+COLORREF colTextDim = RGB(160, 160, 160);
 
 // --- FORWARD DECLARATIONS ---
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -61,7 +67,7 @@ void UpdateLayout(HWND hWnd);
 
 // --- UTILITY ---
 void SyncAddressBar() {
-    if (activeTabIndex != -1 && activeTabIndex < tabs.size() && tabs[activeTabIndex].webview) {
+    if (activeTabIndex != -1 && activeTabIndex < (int)tabs.size() && tabs[activeTabIndex].webview) {
         wil::unique_cotaskmem_string url;
         tabs[activeTabIndex].webview->get_Source(&url);
         SetWindowText(hEdit, url.get());
@@ -69,23 +75,21 @@ void SyncAddressBar() {
 }
 
 void ToggleUIElements(bool show) {
-    int cmd = show ? SW_SHOW : SW_HIDE;
-    ShowWindow(hEdit, cmd);
-    ShowWindow(hSidebarBtn, cmd);
-    ShowWindow(hNewTabBtn, cmd);
-    ShowWindow(hBtnMin, cmd);
-    ShowWindow(hBtnMax, cmd);
-    ShowWindow(hBtnClose, cmd);
-    if (isSidebarOpen) {
-        ShowWindow(hToggleViewBtn, cmd);
-        ShowWindow(hExpandBtn, cmd);
-    }
+    int mainCmd = show ? SW_SHOW : SW_HIDE;
+    ShowWindow(hEdit, mainCmd);
+    ShowWindow(hSidebarBtn, mainCmd);
+    ShowWindow(hNewTabBtn, mainCmd);
+    ShowWindow(hBtnMin, mainCmd);
+    ShowWindow(hBtnMax, mainCmd);
+    ShowWindow(hBtnClose, mainCmd);
+
+    int sidebarControlsCmd = (show && isSidebarOpen) ? SW_SHOW : SW_HIDE;
+    ShowWindow(hToggleViewBtn, sidebarControlsCmd);
+    ShowWindow(hExpandBtn, sidebarControlsCmd);
 }
 
-//  the logic to resize the webview based on the current state (Fullscreen vs Normal)
 void UpdateLayout(HWND hWnd) {
     if (activeTabIndex == -1 || activeTabIndex >= (int)tabs.size()) return;
-
     RECT rc;
     GetClientRect(hWnd, &rc);
 
@@ -98,12 +102,18 @@ void UpdateLayout(HWND hWnd) {
         RECT wR = { xOff, HEADER_TOTAL_HEIGHT, rc.right, rc.bottom };
         tabs[activeTabIndex].controller->put_Bounds(wR);
 
-        // reposition standard UI
-        MoveWindow(hBtnClose, rc.right - 45, 0, 45, 30, TRUE);
-        MoveWindow(hBtnMax, rc.right - 90, 0, 45, 30, TRUE);
-        MoveWindow(hBtnMin, rc.right - 135, 0, 45, 30, TRUE);
-        int editW = min(rc.right - 450, 600);
-        MoveWindow(hEdit, (rc.right - editW) / 2, 15, editW, 30, TRUE);
+        // Header Buttons (Window Controls)
+        MoveWindow(hBtnClose, rc.right - 46, 0, 46, 32, TRUE);
+        MoveWindow(hBtnMax, rc.right - 92, 0, 46, 32, TRUE);
+        MoveWindow(hBtnMin, rc.right - 138, 0, 46, 32, TRUE);
+
+        // Sidebar Toggle
+        MoveWindow(hSidebarBtn, 10, 10, 40, 40, TRUE);
+
+        // Address Bar (Centered & Sized)
+        int editW = min(rc.right - 400, 700);
+        int editX = (rc.right - editW) / 2;
+        MoveWindow(hEdit, editX, 15, editW, 30, TRUE);
 
         ToggleUIElements(true);
     }
@@ -116,7 +126,7 @@ LRESULT CALLBACK EditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     else if (msg == WM_KILLFOCUS) {
         wchar_t buf[2];
-        if (GetWindowText(hWnd, buf, 2) == 0) { SetWindowText(hWnd, L"Search or enter URL"); isPlaceholder = true; }
+        if (GetWindowText(hWnd, buf, 2) == 0) { SetWindowText(hWnd, L"Search or enter URL..."); isPlaceholder = true; }
     }
     else if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
         wchar_t url[2048]; GetWindowText(hWnd, url, 2048);
@@ -129,21 +139,27 @@ LRESULT CALLBACK EditProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
+    // Enable Visual Styles
+    hFontMain = CreateFont(19, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    hFontSmall = CreateFont(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
     WNDCLASSEX wcex = { sizeof(WNDCLASSEX), CS_HREDRAW | CS_VREDRAW, WndProc, 0, 0, hInstance, NULL,
-                        LoadCursor(NULL, IDC_ARROW), CreateSolidBrush(colHeader), NULL, L"SARF_CORE", NULL };
+                        LoadCursor(NULL, IDC_ARROW), CreateSolidBrush(colBgHeader), NULL, L"SARF_CORE", NULL };
     RegisterClassEx(&wcex);
 
     HWND hWnd = CreateWindowEx(0, L"SARF_CORE", L"SARF Browser", WS_POPUP | WS_VISIBLE | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, NULL, NULL, hInstance, NULL);
 
-    hSidebarBtn = CreateWindow(L"BUTTON", L"≡", WS_CHILD | WS_VISIBLE | BS_FLAT, 12, 12, 36, 36, hWnd, (HMENU)(UINT_PTR)IDC_SIDEBAR_BTN, hInstance, NULL);
-    hEdit = CreateWindowEx(0, L"EDIT", L"Search or enter URL", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)(UINT_PTR)IDC_ADDRESS_BAR, hInstance, NULL);
+    // Initial controls creation
+    hSidebarBtn = CreateWindow(L"BUTTON", L"☰", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 0, 0, hWnd, (HMENU)IDC_SIDEBAR_BTN, hInstance, NULL);
+    hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", L"Search or enter URL...", WS_CHILD | WS_VISIBLE | ES_CENTER | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, (HMENU)IDC_ADDRESS_BAR, hInstance, NULL);
+    SendMessage(hEdit, WM_SETFONT, (WPARAM)hFontMain, TRUE);
     OldEditProc = (WNDPROC)SetWindowLongPtr(hEdit, GWLP_WNDPROC, (LONG_PTR)EditProc);
-    hNewTabBtn = CreateWindow(L"BUTTON", L"+", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 28, 28, hWnd, (HMENU)(UINT_PTR)IDC_NEW_TAB_BTN, hInstance, NULL);
 
-    hBtnClose = CreateWindow(L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 45, 30, hWnd, (HMENU)(UINT_PTR)IDC_WIN_CLOSE, hInstance, NULL);
-    hBtnMax = CreateWindow(L"BUTTON", L"❐", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 45, 30, hWnd, (HMENU)(UINT_PTR)IDC_WIN_MAX, hInstance, NULL);
-    hBtnMin = CreateWindow(L"BUTTON", L"⎯", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 45, 30, hWnd, (HMENU)(UINT_PTR)IDC_WIN_MIN, hInstance, NULL);
+    hNewTabBtn = CreateWindow(L"BUTTON", L"+", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 0, 0, hWnd, (HMENU)IDC_NEW_TAB_BTN, hInstance, NULL);
+    hBtnClose = CreateWindow(L"BUTTON", L"✕", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 0, 0, hWnd, (HMENU)IDC_WIN_CLOSE, hInstance, NULL);
+    hBtnMax = CreateWindow(L"BUTTON", L"▢", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 0, 0, hWnd, (HMENU)IDC_WIN_MAX, hInstance, NULL);
+    hBtnMin = CreateWindow(L"BUTTON", L"—", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 0, 0, 0, hWnd, (HMENU)IDC_WIN_MIN, hInstance, NULL);
 
     CreateNewTab(hWnd);
 
@@ -158,10 +174,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
-        hToggleViewBtn = CreateWindow(L"BUTTON", L">", WS_CHILD | WS_VISIBLE | BS_FLAT, SIDEBAR_MIN_WIDTH - 45, HEADER_TOTAL_HEIGHT + 10, 35, 25, hWnd, (HMENU)(UINT_PTR)IDC_TOGGLE_VIEW_BTN, NULL, NULL);
-        hExpandBtn = CreateWindow(L"BUTTON", L"OPEN", WS_CHILD | WS_VISIBLE | BS_FLAT, 150, HEADER_TOTAL_HEIGHT + 12, 50, 22, hWnd, (HMENU)(UINT_PTR)IDC_EXPAND_SIDEBAR, NULL, NULL);
-        hClearBtn = CreateWindow(L"BUTTON", L"Clear History", WS_CHILD | BS_FLAT, 20, HEADER_TOTAL_HEIGHT + 60, 220, 40, hWnd, (HMENU)(UINT_PTR)IDC_CLEAR_HISTORY_BTN, NULL, NULL);
+        hToggleViewBtn = CreateWindow(L"BUTTON", L"›", WS_CHILD | WS_VISIBLE | BS_FLAT, SIDEBAR_MIN_WIDTH - 40, HEADER_TOTAL_HEIGHT + 10, 30, 30, hWnd, (HMENU)IDC_TOGGLE_VIEW_BTN, NULL, NULL);
+        hExpandBtn = CreateWindow(L"BUTTON", L"RESIZE", WS_CHILD | WS_VISIBLE | BS_FLAT, 10, HEADER_TOTAL_HEIGHT + 10, 70, 26, hWnd, (HMENU)IDC_EXPAND_SIDEBAR, NULL, NULL);
     } break;
+
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(255, 255, 255));
+        SetBkColor(hdc, RGB(45, 45, 48));
+        return (LRESULT)CreateSolidBrush(RGB(45, 45, 48));
+    }
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -169,7 +191,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (isVideoFullScreen) { EndPaint(hWnd, &ps); return 0; }
 
         RECT rc; GetClientRect(hWnd, &rc);
-        HBRUSH hHeaderBrush = CreateSolidBrush(colHeader);
+        HBRUSH hHeaderBrush = CreateSolidBrush(colBgHeader);
         RECT headerRect = { 0, 0, rc.right, HEADER_TOTAL_HEIGHT };
         FillRect(hdc, &headerRect, hHeaderBrush);
         DeleteObject(hHeaderBrush);
@@ -178,46 +200,60 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         if (isSidebarOpen) {
             RECT sideRect = { 0, HEADER_TOTAL_HEIGHT, currentSidebarWidth, rc.bottom };
-            HBRUSH hSide = CreateSolidBrush(RGB(18, 18, 20));
+            HBRUSH hSide = CreateSolidBrush(colBgSidebar);
             FillRect(hdc, &sideRect, hSide);
             DeleteObject(hSide);
 
+            SelectObject(hdc, hFontMain);
             SetTextColor(hdc, colAccent);
             if (!isExtrasView) {
-                TextOut(hdc, 15, HEADER_TOTAL_HEIGHT + 15, L"RECENT HISTORY", 14);
-                int hy = HEADER_TOTAL_HEIGHT + 50;
-                SetTextColor(hdc, RGB(220, 220, 220));
+                TextOut(hdc, 20, HEADER_TOTAL_HEIGHT + 50, L"HISTORY", 7);
+                int hy = HEADER_TOTAL_HEIGHT + 85;
+                SelectObject(hdc, hFontSmall);
+                SetTextColor(hdc, colTextDim);
                 for (const auto& url : historyList) {
                     if (hy > rc.bottom - 30) break;
-                    RECT hr = { 15, hy, currentSidebarWidth - 20, hy + 20 };
-                    DrawText(hdc, url.c_str(), -1, &hr, DT_LEFT | DT_SINGLELINE | (isExpanded ? 0 : DT_END_ELLIPSIS));
-                    hy += 35;
+                    RECT hr = { 20, hy, currentSidebarWidth - 20, hy + 25 };
+                    DrawText(hdc, url.c_str(), -1, &hr, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
+                    hy += 30;
                 }
             }
         }
 
-        SetTextColor(hdc, colWhite);
+        // DRAW TABS
         int tx = 10;
+        SelectObject(hdc, hFontSmall);
         for (int i = 0; i < (int)tabs.size(); i++) {
-            RECT tR = { tx, 65, tx + TAB_WIDTH, 65 + 32 };
-            HBRUSH hTb = CreateSolidBrush(i == activeTabIndex ? colTabActive : RGB(45, 45, 48));
+            RECT tR = { tx, 66, tx + TAB_WIDTH, 66 + TAB_HEIGHT };
+            bool isActive = (i == activeTabIndex);
+
+            HBRUSH hTb = CreateSolidBrush(isActive ? colTabActive : colTabInactive);
             FillRect(hdc, &tR, hTb);
             DeleteObject(hTb);
 
-            RECT textR = { tR.left + 5, tR.top, tR.right - TAB_CLOSE_WIDTH, tR.bottom };
+            // Active Tab Accent
+            if (isActive) {
+                RECT accentR = { tR.left, tR.bottom - 3, tR.right, tR.bottom };
+                HBRUSH hAccent = CreateSolidBrush(colAccent);
+                FillRect(hdc, &accentR, hAccent);
+                DeleteObject(hAccent);
+            }
+
+            SetTextColor(hdc, isActive ? colTextMain : colTextDim);
+            RECT textR = { tR.left + 12, tR.top, tR.right - TAB_CLOSE_WIDTH, tR.bottom };
             DrawText(hdc, tabs[i].title.c_str(), -1, &textR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             RECT closeR = { tR.right - TAB_CLOSE_WIDTH, tR.top, tR.right, tR.bottom };
             DrawText(hdc, L"✕", 1, &closeR, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            tx += TAB_WIDTH + 5;
+            tx += TAB_WIDTH + 4;
         }
-        MoveWindow(hNewTabBtn, tx, 67, 28, 28, TRUE);
+        MoveWindow(hNewTabBtn, tx, 69, 28, 28, TRUE);
         EndPaint(hWnd, &ps);
     } break;
 
     case WM_LBUTTONDOWN: {
         int x = LOWORD(lParam), y = HIWORD(lParam);
-        if (y >= 65 && y <= 97) {
+        if (y >= 66 && y <= 100) {
             int tx = 10;
             for (int i = 0; i < (int)tabs.size(); i++) {
                 if (x >= tx && x <= tx + TAB_WIDTH) {
@@ -225,25 +261,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     else SwitchToTab(i, hWnd);
                     return 0;
                 }
-                tx += TAB_WIDTH + 5;
+                tx += TAB_WIDTH + 4;
             }
         }
     } break;
 
-    case WM_SIZE:
-        UpdateLayout(hWnd);
-        break;
+    case WM_SIZE: UpdateLayout(hWnd); break;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_WIN_CLOSE: PostQuitMessage(0); break;
         case IDC_WIN_MIN: ShowWindow(hWnd, SW_MINIMIZE); break;
         case IDC_WIN_MAX: IsZoomed(hWnd) ? ShowWindow(hWnd, SW_RESTORE) : ShowWindow(hWnd, SW_MAXIMIZE); break;
-        case IDC_SIDEBAR_BTN:
-            isSidebarOpen = !isSidebarOpen;
-            UpdateLayout(hWnd);
-            InvalidateRect(hWnd, NULL, TRUE);
-            break;
+        case IDC_SIDEBAR_BTN: isSidebarOpen = !isSidebarOpen; UpdateLayout(hWnd); InvalidateRect(hWnd, NULL, TRUE); break;
         case IDC_NEW_TAB_BTN: CreateNewTab(hWnd); break;
         case IDC_TOGGLE_VIEW_BTN: isExtrasView = !isExtrasView; InvalidateRect(hWnd, NULL, TRUE); break;
         case IDC_EXPAND_SIDEBAR:
@@ -256,12 +286,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_NCHITTEST: {
-        POINT pt = { LOWORD(lParam), HIWORD(lParam) }; ScreenToClient(hWnd, &pt);
+        POINT pt = { LOWORD(lParam), HIWORD(lParam) };
+        ScreenToClient(hWnd, &pt);
         if (isVideoFullScreen) return HTCLIENT;
         RECT winRect; GetClientRect(hWnd, &winRect);
+
+        // Window Controls
         if (pt.y < 32 && pt.x >(winRect.right - 140)) return HTCLIENT;
-        if (pt.y < 60) return HTCLIENT;
-        if (pt.y >= 65 && pt.y <= 100) return HTCLIENT;
+        // Sidebar Btn
+        if (pt.y >= 10 && pt.y <= 50 && pt.x >= 10 && pt.x <= 50) return HTCLIENT;
+        // Address Bar
+        int editW = min(winRect.right - 400, 700);
+        int editX = (winRect.right - editW) / 2;
+        if (pt.y >= 15 && pt.y <= 45 && pt.x >= editX && pt.x <= (editX + editW)) return HTCLIENT;
+        // Tabs
+        if (pt.y >= 66 && pt.y <= 100) return HTCLIENT;
+
         if (pt.y < HEADER_TOTAL_HEIGHT) return HTCAPTION;
         return DefWindowProc(hWnd, msg, wParam, lParam);
     } break;
@@ -272,6 +312,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
+// Logic for creating tabs, switching, and closing remains functional as per original.
 void CreateNewTab(HWND hWnd) {
     CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
@@ -284,7 +325,6 @@ void CreateNewTab(HWND hWnd) {
                             nt.controller = ctrl;
                             nt.controller->get_CoreWebView2(&nt.webview);
 
-                            // detect Fullscreen events per tab
                             nt.webview->add_ContainsFullScreenElementChanged(Callback<ICoreWebView2ContainsFullScreenElementChangedEventHandler>(
                                 [hWnd](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
                                     BOOL fs;
@@ -325,19 +365,12 @@ void CreateNewTab(HWND hWnd) {
 
 void SwitchToTab(int index, HWND hWnd) {
     if (index < 0 || index >= (int)tabs.size()) return;
-
-    // 1. set the new index
     activeTabIndex = index;
-
-    // 2. loop through all tabs to manage visibility and size
     for (int i = 0; i < (int)tabs.size(); i++) {
         if (i == activeTabIndex) {
-            // Before making it visible, check if we need to sync fullscreen status for this specific tab
             BOOL fs;
             tabs[i].webview->get_ContainsFullScreenElement(&fs);
             isVideoFullScreen = fs;
-
-            // bounds are set correctly for the new tab BEFORE showing it
             UpdateLayout(hWnd);
             tabs[i].controller->put_IsVisible(TRUE);
         }
@@ -345,7 +378,6 @@ void SwitchToTab(int index, HWND hWnd) {
             tabs[i].controller->put_IsVisible(FALSE);
         }
     }
-
     SyncAddressBar();
     InvalidateRect(hWnd, NULL, TRUE);
 }
